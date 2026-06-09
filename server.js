@@ -1,118 +1,293 @@
-# VidDrop — Instalador de Vídeos
+const express   = require('express');
+const cors      = require('cors');
+const path      = require('path');
+const fs        = require('fs');
+const { spawn } = require('child_process');
+const { v4: uuidv4 } = require('uuid');
 
-Downloader de vídeos com frontend HTML/CSS e backend Node.js usando yt-dlp.
+const app  = express();
+const PORT = process.env.PORT || 3000;
 
----
+const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
+if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
 
-## Requisitos
+app.use(cors());
+app.use(express.json());
 
-- **Node.js** 18+
-- **yt-dlp** instalado e no PATH
-- **ffmpeg** instalado (para merge de vídeo+áudio)
+function getYtDlpBin() {
+  const local = path.join(__dirname, 'yt-dlp.exe');
+  if (fs.existsSync(local)) return local;
+  return process.env.YTDLP_BIN || 'yt-dlp';
+}
 
----
+function getFfmpegBin() {
+  const local = path.join(__dirname, 'ffmpeg.exe');
+  if (fs.existsSync(local)) return local;
+  return process.env.FFMPEG_BIN || 'ffmpeg';
+}
 
-## Instalação Rápida
+function isHLS(url) {
+  return /\.m3u8/i.test(url) || url.includes('/hls/');
+}
 
-### 1. Instalar yt-dlp
+function cleanUrl(raw) {
+  try {
+    const u = new URL(raw);
+    ['list','index','start_radio','pp','si','feature','ab_channel'].forEach(p => u.searchParams.delete(p));
+    return u.toString();
+  } catch { return raw; }
+}
 
-**Windows:**
-```powershell
-winget install yt-dlp
-# ou manualmente: baixar yt-dlp.exe de https://github.com/yt-dlp/yt-dlp/releases
-```
+// ── DIAGNÓSTICO ──────────────────────────────────────────────
+app.get('/test', (req, res) => {
+  const ytdlp = getYtDlpBin();
+  const args  = ['--version'];
+  let out = '', err = '';
+  const proc = spawn(ytdlp, args, { stdio: ['ignore','pipe','pipe'] });
+  proc.stdout.on('data', d => out += d);
+  proc.stderr.on('data', d => err += d);
+  proc.on('close', code => {
+    res.json({ ytdlp, ffmpeg: getFfmpegBin(), version: out.trim(), code, err: err.trim() });
+  });
+});
 
-**Linux/Mac:**
-```bash
-pip install yt-dlp
-# ou
-sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-sudo chmod a+rx /usr/local/bin/yt-dlp
-```
+// ── INFO ─────────────────────────────────────────────────────
+app.post('/info', (req, res) => {
+  const url = cleanUrl(req.body.url || '');
+  if (!url) return res.status(400).json({ error: 'URL obrigatória.' });
 
-### 2. Instalar ffmpeg
+  if (isHLS(url)) {
+    return res.json({ title: 'Stream HLS', thumbnail: null, duration: null });
+  }
 
-**Windows:** https://ffmpeg.org/download.html → adicionar ao PATH
+  const args = ['--dump-json', '--no-playlist', '--no-warnings', url];
+  let out = '', err = '';
+  const proc = spawn(getYtDlpBin(), args, { stdio: ['ignore','pipe','pipe'] });
+  proc.stdout.on('data', d => out += d);
+  proc.stderr.on('data', d => err += d);
+  proc.on('close', code => {
+    if (code !== 0 || !out.trim()) {
+      const msg = err.split('\n').filter(l => l && !l.startsWith('[debug]') && !l.startsWith('WARNING'))[0] || 'Erro ao buscar vídeo.';
+      return res.status(400).json({ error: msg.trim() });
+    }
+    try {
+      const info = JSON.parse(out.trim().split('\n')[0]);
+      res.json({ title: info.title, thumbnail: info.thumbnail, duration: info.duration });
+    } catch {
+      res.status(500).json({ error: 'Falha ao processar resposta.' });
+    }
+  });
+});
 
-**Linux:**
-```bash
-sudo apt install ffmpeg
-```
+// ── DOWNLOAD ─────────────────────────────────────────────────
+app.post('/download', (req, res) => {
+  const url      = cleanUrl(req.body.url || '');
+  const format   = req.body.format || 'bestvideo[height<=1080]+bestaudio/best';
+  const audioOnly = !!req.body.audioOnly;
 
-**Mac:**
-```bash
-brew install ffmpeg
-```
+  if (!url) return res.status(400).json({ error: 'URL obrigatória.' });
 
-### 3. Instalar dependências e rodar
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
 
-```bash
-npm install
-npm start
-```
+  const send = obj => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  const jobId = uuidv4();
 
-Acesse: **http://localhost:3000**
+  if (isHLS(url) && !audioOnly) {
+    runFfmpeg(url, jobId, send, res, format);
+  } else {
+    runYtDlp(url, format, audioOnly, jobId, send, res);
+  }
+});
 
----
+function runFfmpeg(url, jobId, send, res, format) {
+  const outFile   = path.join(DOWNLOADS_DIR, `${jobId}.mp4`);
+  const ffmpegBin = getFfmpegBin();
+  const args = [
+    '-nostdin', '-y',
+    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/125.0.0.0 Safari/537.36',
+    '-i', url, '-c', 'copy', '-bsf:a', 'aac_adtstoasc',
+    outFile,
+  ];
 
-## Estrutura
+  console.log('[ffmpeg] iniciando HLS download');
+  const proc = spawn(ffmpegBin, args, { stdio: ['ignore','pipe','pipe'] });
+  let log = '', totalSecs = 0;
 
-```
-video-downloader/
-├── public/
-│   ├── index.html    ← Frontend
-│   ├── style.css     ← Estilos
-│   └── app.js        ← JavaScript do cliente
-├── downloads/        ← Arquivos temporários (auto-deletados em 10 min)
-├── server.js         ← Backend Express + yt-dlp
-├── package.json
-└── README.md
-```
+  const hb = setInterval(() => {
+    try {
+      if (!fs.existsSync(outFile)) return;
+      const mb = (fs.statSync(outFile).size / 1048576).toFixed(1);
+      if (parseFloat(mb) > 0) send({ type:'progress', percent:-1, status:`Baixando... ${mb} MB`, speed:null, eta:null });
+    } catch {}
+  }, 2000);
 
----
+  proc.stderr.on('data', d => {
+    const t = d.toString(); log += t;
+    const dm = /Duration:\s+(\d+):(\d+):(\d+)/.exec(t);
+    if (dm && !totalSecs) totalSecs = +dm[1]*3600 + +dm[2]*60 + +dm[3];
+    const tm = /time=(\d+):(\d+):(\d+)/.exec(t);
+    if (tm && totalSecs) {
+      const cur = +tm[1]*3600 + +tm[2]*60 + +tm[3];
+      send({ type:'progress', percent: Math.min(99, Math.round(cur/totalSecs*100)), status:'Baixando...', speed:null, eta:null });
+    }
+  });
 
-## Variáveis de Ambiente
+  proc.on('close', code => {
+    clearInterval(hb);
+    if (code !== 0 || !fs.existsSync(outFile)) {
+      console.log('[ffmpeg falhou] fallback yt-dlp');
+      send({ type:'progress', percent:0, status:'Tentando método alternativo...', speed:null, eta:null });
+      runYtDlp(url, format || 'bestvideo[height<=1080]+bestaudio/best', false, jobId, send, res);
+      return;
+    }
+    finish(outFile, send, res);
+  });
 
-| Variável      | Padrão    | Descrição                              |
-|---------------|-----------|----------------------------------------|
-| `PORT`        | `3000`    | Porta do servidor                      |
-| `YTDLP_BIN`   | `yt-dlp`  | Caminho customizado do executável      |
+  req_cleanup(res, proc);
+}
 
----
+function runYtDlp(url, format, audioOnly, jobId, send, res) {
+  const ext    = audioOnly ? '%(ext)s' : 'mp4';
+  const outTpl = path.join(DOWNLOADS_DIR, `${jobId}_%(epoch)s.${ext}`);
+  const bin    = getYtDlpBin();
 
-## Deploy no Render
+  const cookiesFile = path.join(__dirname, 'cookies.txt');
+  const args = [
+    '--no-playlist',
+    '--newline',
+    '--force-overwrites',
+    '--ffmpeg-location', getFfmpegBin(),
+    '--concurrent-fragments', '4',
+    '-o', outTpl,
+  ];
 
-1. Suba o projeto no GitHub
-2. Crie um Web Service no Render
-3. Build command: `npm install`
-4. Start command: `npm start`
-5. Adicione a variável `YTDLP_BIN` se necessário
+  // Usa cookies se disponível (para vídeos com restrição de idade)
+  if (fs.existsSync(cookiesFile)) {
+    args.push('--cookies', cookiesFile);
+  }
 
-> **Atenção:** O Render free tier não tem yt-dlp por padrão. Use um Dockerfile ou instale via script de build.
+  if (audioOnly) {
+    args.push('-x', '--audio-format', 'mp3');
+  } else {
+    args.push('-f', format);
+    args.push('--merge-output-format', 'mp4');
+    // Converte áudio para AAC para garantir compatibilidade com mp4
+    args.push('--postprocessor-args', 'ffmpeg:-c:a aac');
+  }
+  args.push(url);
 
-### Dockerfile (opcional)
+  console.log('[yt-dlp] formato:', format, '| audioOnly:', audioOnly);
+  console.log('[yt-dlp] args:', args.join(' '));
 
-```dockerfile
-FROM node:20-slim
-RUN apt-get update && apt-get install -y python3 pip ffmpeg \
- && pip install yt-dlp --break-system-packages
-WORKDIR /app
-COPY package*.json ./
-RUN npm install
-COPY . .
-EXPOSE 3000
-CMD ["node", "server.js"]
-```
+  const proc = spawn(bin, args, { stdio: ['ignore','pipe','pipe'] });
+  let filename = null, errLog = '';
 
----
+  const rePct  = /(\d+\.?\d*)%/;
+  const reSpd  = /(\d+\.?\d*\s*[KMGkmg]i?B\/s)/;
+  const reEta  = /ETA\s+([\d:]+)/;
+  const reDest = /Destination:\s+(.+)/;
+  const reFrag = /frag\s+(\d+)\/(\d+)/i;
+  const reAlready = /already been downloaded/;
 
-## Funcionalidades
+  const hb = setInterval(() => {
+    try {
+      const f = fs.readdirSync(DOWNLOADS_DIR).filter(f => f.startsWith(jobId));
+      if (!f.length) return;
+      const mb = (fs.statSync(path.join(DOWNLOADS_DIR, f[0])).size / 1048576).toFixed(1);
+      if (parseFloat(mb) > 0) send({ type:'progress', percent:-1, status:`Baixando... ${mb} MB`, speed:null, eta:null });
+    } catch {}
+  }, 3000);
 
-- ✅ Buscar informações do vídeo (título, thumbnail, duração)
-- ✅ Selecionar qualidade: 4K, 1080p, 720p, 480p
-- ✅ Extrair apenas áudio em MP3
-- ✅ Barra de progresso em tempo real (SSE)
-- ✅ Download automático do arquivo ao concluir
-- ✅ Auto-delete de arquivos após 10 minutos
-- ✅ Limpeza automática a cada 1 hora
-- ✅ Suporte a +1000 sites (YouTube, Instagram, TikTok, Twitter, etc.)
+  function parse(line) {
+    if (!line.trim()) return;
+    const dm = reDest.exec(line);
+    if (dm) filename = dm[1].trim();
+
+    if (reAlready.test(line) && filename) {
+      clearInterval(hb); finish(filename, send, res); proc.kill(); return;
+    }
+
+    const pm = rePct.exec(line);
+    if (pm) {
+      send({ type:'progress', percent: parseFloat(pm[1]), status:'Baixando...',
+        speed: (reSpd.exec(line)||[])[1]||null, eta: (reEta.exec(line)||[])[1]||null });
+      return;
+    }
+
+    const fm = reFrag.exec(line);
+    if (fm) {
+      const [,c,t] = fm;
+      send({ type:'progress', percent: Math.round(+c/+t*100), status:`Fragmento ${c}/${t}`, speed:null, eta:null });
+    }
+  }
+
+  proc.stdout.on('data', d => d.toString().split('\n').forEach(parse));
+  proc.stderr.on('data', d => {
+    const t = d.toString(); errLog += t;
+    t.split('\n').forEach(l => { if(l) console.error('[yt-dlp stderr]', l); parse(l); });
+  });
+
+  proc.on('close', code => {
+    clearInterval(hb);
+    if (code !== 0) {
+      const msg = errLog.split('\n').filter(l => l && !l.startsWith('[debug]') && !l.startsWith('WARNING') && !l.startsWith('[youtube]')).pop() || 'Falha no download.';
+      send({ type:'error', message: msg.trim() });
+      return res.end();
+    }
+
+    if (!filename || !fs.existsSync(filename)) {
+      const files = fs.readdirSync(DOWNLOADS_DIR)
+        .filter(f => f.startsWith(jobId))
+        .map(f => path.join(DOWNLOADS_DIR, f))
+        .sort((a,b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+      filename = files[0];
+    }
+
+    if (!filename || !fs.existsSync(filename)) {
+      send({ type:'error', message:'Arquivo não encontrado após download.' });
+      return res.end();
+    }
+
+    finish(filename, send, res);
+  });
+}
+
+function finish(filePath, send, res) {
+  const basename = path.basename(filePath);
+  send({ type:'done', filename: basename, url:`/files/${encodeURIComponent(basename)}` });
+  res.end();
+  setTimeout(() => { try { fs.unlinkSync(filePath); } catch {} }, 10*60*1000);
+}
+
+function req_cleanup(res, proc) {
+  res.on('close', () => { try { proc.kill(); } catch {} });
+}
+
+// ── ARQUIVOS ─────────────────────────────────────────────────
+app.use('/files', (req, res, next) => {
+  const file = path.join(DOWNLOADS_DIR, decodeURIComponent(path.basename(req.path)));
+  if (fs.existsSync(file)) return res.download(file);
+  next();
+});
+
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Limpeza a cada 1h
+setInterval(() => {
+  try {
+    fs.readdirSync(DOWNLOADS_DIR).forEach(f => {
+      const fp = path.join(DOWNLOADS_DIR, f);
+      try { if (fs.statSync(fp).mtimeMs < Date.now() - 3600000) fs.unlinkSync(fp); } catch {}
+    });
+  } catch {}
+}, 3600000);
+
+app.listen(PORT, () => {
+  console.log(`\n🟢 VidDrop rodando em http://localhost:${PORT}`);
+  console.log(`📁 Downloads: ${DOWNLOADS_DIR}`);
+  console.log(`🔧 yt-dlp:   ${getYtDlpBin()}`);
+  console.log(`🎞  ffmpeg:   ${getFfmpegBin()}\n`);
+});

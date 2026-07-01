@@ -9,8 +9,6 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
-  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-2837105116357396"
-     crossorigin="anonymous"></script>
 </head>
 <body>
   <header class="site-header">
@@ -88,7 +86,7 @@
                 <p class="format-label" data-i18n="quality">Selecione a qualidade</p>
                 <div class="format-grid" id="formatTabs"></div>
               </div>
-              <button class="dl-btn" onclick="startDownload()">
+              <button class="dl-btn" onclick="startDownload(); openSmartlink();">
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                   <path d="M8 2v9M5 8l3 3 3-3M2 13h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
@@ -276,6 +274,9 @@
   <script src="app.js"></script>
   <script>
     function toggleMenu() { document.getElementById('mobileMenu').classList.toggle('open'); }
+    function openSmartlink() {
+      window.open('https://www.effectivecpmnetwork.com/x9vwah2ax?key=be1d80f0631c52da3522eb707c974939', '_blank', 'noopener');
+    }
     function clearInput() {
       document.getElementById('urlInput').value = '';
       document.getElementById('clearBtn').style.display = 'none';
@@ -311,5 +312,7 @@
       });
     });
   </script>
+  <!-- Adsterra Popunder -->
+  <script src="https://pl30147813.effectivecpmnetwork.com/44/22/31/4422313f04ddce93f9f21b2a7acdc36f.js"></script>
 </body>
 </html>
